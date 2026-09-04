@@ -41,46 +41,51 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+RTC_HandleTypeDef hrtc;
+
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim6;
-TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim16;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+volatile int timerRunning;
+
 UBYTE BlackImage[5000];
-PAINT_TIME sPaint_time;
-sFONT font;
-int fontWidth;
-int fontHeight;
-uint32_t PrevB1Press;
-uint32_t PrevB2Press;
-int refreshFlag;
-int adjMode;
-int adjPos;
+sFONT timeFont;
+sFONT smallFont;
+int timeWidth;
+int timeHeight;
+int smallWidth;
+int smallHeight;
 
-typedef enum {
-	MON,
-	TUE,
-	WED,
-	THU,
-	FRI,
-	SAT,
-	SUN
-} dayName;
+volatile uint32_t currentMS;
+volatile uint32_t PrevB1Press;
+volatile uint32_t PrevB2Press;
+volatile uint32_t PrevB3Press;
+volatile uint32_t PrevB4Press;
 
-int todayName = WED;
-int day = 22;
-int month = 7;
-int year = 2026;
+volatile int refreshFlag;
+volatile int adjMode;
+volatile int adjPos;
 
-int alarmHour;
-int alarmMinute;
-int alarmToggle;
-int alarmPlay;
-int alarmStopped;
+RTC_TimeTypeDef sTime;
+RTC_DateTypeDef sDate;
+
+volatile int hour;
+volatile int minute;
+volatile int weekDay;
+volatile int day;
+volatile int month;
+volatile int year;
+
+volatile int alarmHour;
+volatile int alarmMinute;
+volatile int alarmToggle;
+volatile int alarmPlay;
+volatile int alarmStopped;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,57 +94,46 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM6_Init(void);
-static void MX_TIM7_Init(void);
 static void MX_TIM16_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
+uint32_t RTC_GetTotalMS(void) {
+    RTC_TimeTypeDef t;
+    RTC_DateTypeDef d;
+    HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+
+    uint32_t ms = (255 - t.SubSeconds) / 256 * 1000;
+    return (uint32_t)t.Hours * 3600000
+         + (uint32_t)t.Minutes * 60000
+         + (uint32_t)t.Seconds * 1000
+    	 + ms;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	if (htim == &htim6) {
-		if (HAL_GPIO_ReadPin(GPIOB, B1_Pin) == GPIO_PIN_SET) {
+		if (HAL_GPIO_ReadPin(GPIOA, B3_Pin) == GPIO_PIN_SET && (RTC_GetTotalMS() - PrevB3Press) >= 1000) {
 			HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
 			adjMode = adjMode ^ 1;
 			adjPos = 0;
-			Paint_DrawRectangle(0, 70 + fontHeight,
-								  fontWidth * 2 - 3, 75 + fontHeight,
-								  BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
 			refreshFlag = 1;
 			HAL_TIM_Base_Stop_IT(htim);
 		}
-	} else if (htim == &htim7) {
-		sPaint_time.Sec = sPaint_time.Sec + 1;
-		if (sPaint_time.Sec == 60) {
-			sPaint_time.Min = sPaint_time.Min + 1;
-			sPaint_time.Sec = 0;
-			if (sPaint_time.Min == 60) {
-				sPaint_time.Hour =  sPaint_time.Hour + 1;
-				sPaint_time.Min = 0;
-				if (sPaint_time.Hour >= 24) {
-					sPaint_time.Hour = 0;
-					sPaint_time.Min = 0;
-					sPaint_time.Sec = 0;
-
-					todayName++;
-					if (todayName > SUN) {
-						todayName = MON;
-					}
-
-					day++;
-				}
-			}
-		}
-		Paint_ClearWindows(0, 74, 0 + fontWidth * 7, 74 + fontHeight, WHITE);
-		Paint_DrawTime(0, 74, &sPaint_time, &font, WHITE, BLACK);
-
-		refreshFlag = 1;
+		timerRunning = 0;
 	} else if (htim == &htim16) {
 		HAL_GPIO_TogglePin(GPIOA, BUZZER_Pin);
 	}
 
+}
+
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
+	refreshFlag = 1;
 }
 
 int maxDay() {
@@ -157,77 +151,113 @@ int maxDay() {
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	SystemClock_Config();
+	HAL_ResumeTick();
+
 	if (alarmPlay) {
 		HAL_TIM_Base_Stop_IT(&htim16);
 		alarmPlay = 0;
 		alarmStopped = 1;
+		timerRunning = 0;
+	}
+
+	currentMS = RTC_GetTotalMS();
+
+	if (GPIO_Pin == B4_Pin) {
+		if (!adjMode && (currentMS - PrevB4Press) >= 1000 && HAL_GPIO_ReadPin(GPIOA, B4_Pin) == GPIO_PIN_SET) {
+			PrevB4Press = currentMS;
+			alarmToggle ^= 1;
+			refreshFlag = 1;
+		}
+	}
+
+	if (GPIO_Pin == B3_Pin) {
+		if ((currentMS - PrevB3Press) >= 1000 && HAL_GPIO_ReadPin(GPIOA, B3_Pin) == GPIO_PIN_SET) {
+			PrevB3Press = currentMS;
+
+			timerRunning = 1;
+			HAL_TIM_Base_Stop_IT(&htim6);
+			__HAL_TIM_SET_COUNTER(&htim6, 0);
+			HAL_TIM_Base_Start_IT(&htim6);
+		}
 	}
 
 	if (GPIO_Pin == B2_Pin) {
-		if ((HAL_GetTick() - PrevB2Press) > 500 && HAL_GPIO_ReadPin(GPIOB, B2_Pin) == GPIO_PIN_SET && adjMode) {
-			PrevB2Press = HAL_GetTick();
+		if ((currentMS - PrevB2Press) >= 10000 && HAL_GPIO_ReadPin(GPIOB, B2_Pin) == GPIO_PIN_SET && adjMode) {
+			PrevB2Press = currentMS;
 
 			switch (adjPos) {
 			case 0:
-				sPaint_time.Hour = sPaint_time.Hour + 1;
+				hour = hour + 1;
 
-				if (sPaint_time.Hour >= 24) {
-					sPaint_time.Hour = 0;
+				if (hour >= 24) {
+					hour = 0;
 				}
+
+				sTime.Hours = hour;
+				HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 				break;
 			case 1:
-				sPaint_time.Min = sPaint_time.Min + 1;
+				minute = minute + 1;
 
-				if (sPaint_time.Min >= 60) {
-					sPaint_time.Min = 0;
+				if (minute >= 60) {
+					minute = 0;
 				}
+
+				sTime.Minutes = minute;
+				HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 				break;
 			case 2:
-				sPaint_time.Sec = sPaint_time.Sec + 1;
+				weekDay++;
 
-				if (sPaint_time.Sec >= 60) {
-					sPaint_time.Sec = 0;
+				if (weekDay > 6) {
+					weekDay = 0;
 				}
+
+				sDate.WeekDay = weekDay;
+				HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 				break;
 			case 3:
-				todayName++;
-
-				if (todayName > SUN) {
-					todayName = MON;
-				}
-				break;
-			case 4:
 				month++;
 
 				if (month > 12) {
 					month = 1;
 				}
+
+				sDate.Month = month;
+				HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 				break;
-			case 5:
+			case 4:
 				day++;
 
 				if (day > maxDay()) {
 					day = 1;
 				}
+
+				sDate.Date = day;
+				HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 				break;
-			case 6:
+			case 5:
 				year++;
 
-				if (year > 2100) {
+				if (year > 2099) {
 					year = 2000;
 				}
+
+				sDate.Year = year;
+				HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 				break;
-			case 7:
+			case 6:
 				alarmToggle ^= 1;
 				break;
-			case 8:
+			case 7:
 				alarmHour++;
 
 				if (alarmHour > 24) {
 					alarmHour = 1;
 				}
 				break;
-			case 9:
+			case 8:
 				alarmMinute++;
 
 				if (alarmMinute >= 60) {
@@ -236,27 +266,27 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 				break;
 			default:
 			}
+
+			refreshFlag = 1;
 		}
 	}
 
 	if (GPIO_Pin == B1_Pin) {
-		if ((HAL_GetTick() - PrevB1Press) > 500 && HAL_GPIO_ReadPin(GPIOB, B1_Pin) == GPIO_PIN_SET) {
-			PrevB1Press = HAL_GetTick();
+		if ((currentMS - PrevB1Press) >= 1000 && HAL_GPIO_ReadPin(GPIOB, B1_Pin) == GPIO_PIN_SET) {
+			PrevB1Press = currentMS;
 
 			if (adjMode) {
 				adjPos++;
+				refreshFlag = 1;
 				if (adjPos > 9) {
 					adjPos = 0;
 				}
 			}
-
-			HAL_TIM_Base_Stop_IT(&htim6);
-			HAL_TIM_Base_Start_IT(&htim6);
 		}
 	}
 }
 
-const char* dayString(dayName day) {
+const char* dayString(uint8_t day) {
 	switch(day) {
 	case 0:
 		return "MON";
@@ -275,6 +305,140 @@ const char* dayString(dayName day) {
 	default:
 		return "";
 	}
+}
+
+void refresh(void) {
+	if (adjMode) {
+	  switch(adjPos) {
+	  case 0:
+		  Paint_ClearWindows(smallWidth * 3, EPD_1IN54_V2_HEIGHT - smallHeight, smallWidth * 5, EPD_1IN54_V2_HEIGHT, WHITE);
+		  Paint_DrawNum(smallWidth * 3, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute / 10, &smallFont, WHITE, BLACK);
+		  Paint_DrawNum(smallWidth * 4, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute % 10, &smallFont, WHITE, BLACK);
+
+		  Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, BLACK, WHITE);
+		  Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, BLACK, WHITE);
+		  break;
+	  case 1:
+		  Paint_ClearWindows(100 - timeWidth * 2.5, 100 - timeHeight / 2, 100 - timeWidth * 0.5, 100 + timeHeight / 2, WHITE);
+		  Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, WHITE, BLACK);
+		  Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, WHITE, BLACK);
+
+		  Paint_DrawNum(100 + timeWidth / 2, 100 - timeHeight / 2, minute / 10, &timeFont, BLACK, WHITE);
+		  Paint_DrawNum(100 + timeWidth * 1.5, 100 - timeHeight / 2, minute % 10, &timeFont, BLACK, WHITE);
+		  break;
+	  case 2:
+		  Paint_ClearWindows(100 + timeWidth / 2, 100 - timeHeight / 2, 100 + timeWidth * 2.5, 100 + timeHeight / 2, WHITE);
+		  Paint_DrawNum(100 + timeWidth / 2, 100 - timeHeight / 2, minute / 10, &timeFont, WHITE, BLACK);
+		  Paint_DrawNum(100 + timeWidth * 1.5, 100 - timeHeight / 2, minute % 10, &timeFont, WHITE, BLACK);
+
+		  Paint_DrawString_EN(0, 0, dayString(weekDay), &smallFont, WHITE, BLACK);
+		  break;
+	  case 3:
+		  Paint_ClearWindows(0, 0, smallWidth*3, smallHeight, WHITE);
+		  Paint_DrawString_EN(0, 0, dayString(weekDay), &smallFont, BLACK, WHITE);
+
+		  Paint_DrawNum(0, smallHeight, month / 10, &smallFont, BLACK, WHITE);
+		  Paint_DrawNum(smallWidth, smallHeight, month % 10, &smallFont, BLACK, WHITE);
+		  break;
+	  case 4:
+		  Paint_ClearWindows(0, smallHeight, smallWidth*2, smallHeight*2, WHITE);
+		  Paint_DrawNum(0, smallHeight, month / 10, &smallFont, WHITE, BLACK);
+		  Paint_DrawNum(smallWidth, smallHeight, month % 10, &smallFont, WHITE, BLACK);
+
+		  Paint_DrawNum(smallWidth * 3, smallHeight, day / 10, &smallFont, BLACK, WHITE);
+		  Paint_DrawNum(smallWidth * 4, smallHeight, day % 10, &smallFont, BLACK, WHITE);
+		  break;
+	  case 5:
+		  Paint_ClearWindows(smallWidth*3, smallHeight, smallWidth*5, smallHeight*2, WHITE);
+		  Paint_DrawNum(smallWidth * 3, smallHeight, day / 10, &smallFont, WHITE, BLACK);
+		  Paint_DrawNum(smallWidth * 4, smallHeight, day % 10, &smallFont, WHITE, BLACK);
+
+		  Paint_DrawNum(smallWidth * 6, smallHeight, year, &smallFont, BLACK, WHITE);
+		  break;
+	  case 6:
+		  Paint_ClearWindows(smallWidth*6, smallHeight, smallWidth*10, smallHeight*2, WHITE);
+		  Paint_DrawNum(smallWidth * 6, smallHeight, year, &smallFont, WHITE, BLACK);
+
+		  Paint_DrawString_EN(smallWidth * 6, EPD_1IN54_V2_HEIGHT - smallHeight * 2, (alarmToggle == 0) ? "OFF" : "ON ", &smallFont, WHITE, BLACK);
+		  break;
+	  case 7:
+		  Paint_ClearWindows(smallWidth*6, EPD_1IN54_V2_HEIGHT - smallHeight * 2, smallWidth*9, EPD_1IN54_V2_HEIGHT - smallHeight, WHITE);
+		  Paint_DrawString_EN(smallWidth * 6, EPD_1IN54_V2_HEIGHT - smallHeight * 2, (alarmToggle == 0) ? "OFF" : "ON ", &smallFont, BLACK, WHITE);
+
+		  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour / 10, &smallFont, BLACK, WHITE);
+		  Paint_DrawNum(smallWidth, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour % 10, &smallFont, BLACK, WHITE);
+		  break;
+	  case 8:
+		  Paint_ClearWindows(0, EPD_1IN54_V2_HEIGHT - smallHeight, smallWidth*2, EPD_1IN54_V2_HEIGHT, WHITE);
+		  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour / 10, &smallFont, WHITE, BLACK);
+		  Paint_DrawNum(smallWidth, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour % 10, &smallFont, WHITE, BLACK);
+
+		  Paint_DrawNum(smallWidth * 3, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute / 10, &smallFont, BLACK, WHITE);
+		  Paint_DrawNum(smallWidth * 4, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute % 10, &smallFont, BLACK, WHITE);
+		  break;
+	  default:
+	  }
+  } else {
+	  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+	  HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+	  hour = sTime.Hours;
+	  minute = sTime.Minutes;
+	  weekDay = sDate.WeekDay;
+	  day = sDate.Date;
+	  month = sDate.Month;
+	  year = sDate.Year;
+
+	  if (day > maxDay()) {
+		  day = 1;
+		  month++;
+
+		  if (month > 12) {
+			  month = 1;
+			  year++;
+		  }
+	  }
+
+	  if (alarmToggle && !alarmStopped && !alarmPlay
+		&& hour == alarmHour && minute == alarmMinute) {
+		  HAL_TIM_Base_Start_IT(&htim16);
+		  alarmPlay = 1;
+		  timerRunning = 1;
+	  }
+
+	  if (alarmStopped && hour == alarmHour && minute == alarmMinute + 1) {
+		  alarmStopped = 0;
+	  }
+
+	  Paint_ClearWindows(100 - timeWidth * 2.5, 100 - timeHeight / 2, 100 + timeWidth*2.5, 100 + timeHeight / 2, WHITE);
+	  Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, WHITE, BLACK);
+	  Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, WHITE, BLACK);
+	  Paint_DrawChar(100 - timeWidth / 2, 100 - timeHeight / 2, ':', &timeFont, BLACK, WHITE);
+	  Paint_DrawNum(100 + timeWidth / 2, 100 - timeHeight / 2, minute / 10, &timeFont, WHITE, BLACK);
+	  Paint_DrawNum(100 + timeWidth * 1.5, 100 - timeHeight / 2, minute % 10, &timeFont, WHITE, BLACK);
+
+	  Paint_ClearWindows(0, 0, smallWidth*10, smallHeight*2, WHITE);
+	  Paint_DrawString_EN(0, 0, dayString(weekDay), &smallFont, BLACK, WHITE);
+	  Paint_DrawNum(0, smallHeight, month / 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawNum(smallWidth, smallHeight, month % 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawChar(smallWidth * 2, smallHeight, '-', &smallFont, BLACK, WHITE);
+	  Paint_DrawNum(smallWidth * 3, smallHeight, day / 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawNum(smallWidth * 4, smallHeight, day % 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawChar(smallWidth * 5, smallHeight, '-', &smallFont, BLACK, WHITE);
+	  Paint_DrawNum(smallWidth * 6, smallHeight, year, &smallFont, WHITE, BLACK);
+
+	  Paint_ClearWindows(0, EPD_1IN54_V2_HEIGHT - smallHeight * 2, smallWidth*9, EPD_1IN54_V2_HEIGHT, WHITE);
+	  Paint_DrawString_EN(0, EPD_1IN54_V2_HEIGHT - smallHeight * 2, "ALARM", &smallFont, BLACK, WHITE);
+	  Paint_DrawString_EN(smallWidth * 6, EPD_1IN54_V2_HEIGHT - smallHeight * 2, (alarmToggle == 0) ? "OFF" : "ON ", &smallFont, BLACK, WHITE);
+	  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour / 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawNum(smallWidth, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour % 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawChar(smallWidth * 2, EPD_1IN54_V2_HEIGHT - smallHeight, ':', &smallFont, BLACK, WHITE);
+	  Paint_DrawNum(smallWidth * 3, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute / 10, &smallFont, WHITE, BLACK);
+	  Paint_DrawNum(smallWidth * 4, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute % 10, &smallFont, WHITE, BLACK);
+  }
+
+  EPD_1IN54_V2_DisplayPart(BlackImage);
+  refreshFlag = 0;
 }
 
 /* USER CODE END 0 */
@@ -311,19 +475,22 @@ int main(void)
   MX_SPI1_Init();
   MX_USART2_UART_Init();
   MX_TIM6_Init();
-  MX_TIM7_Init();
   MX_TIM16_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
 
-  // 1. Init hardware and display
   DEV_Module_Init();
   EPD_1IN54_V2_Init();
   EPD_1IN54_V2_Clear();
   DEV_Delay_ms(500);
 
-  font = Consolas26;
-  fontWidth = font.Width;
-  fontHeight = font.Height;
+  timeFont = Consolas28;
+  timeWidth = timeFont.Width;
+  timeHeight = timeFont.Height;
+
+  smallFont = Font24;
+  smallWidth = smallFont.Width;
+  smallHeight = smallFont.Height;
 
   Paint_NewImage(BlackImage, EPD_1IN54_V2_WIDTH, EPD_1IN54_V2_HEIGHT, 270, WHITE);
 
@@ -331,38 +498,47 @@ int main(void)
   Paint_SelectImage(BlackImage);
   Paint_Clear(WHITE);
 
-  sPaint_time.Hour = 12;
-  sPaint_time.Min = 34;
-  sPaint_time.Sec = 56;
+  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+  HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
-  alarmHour = 12;
-  alarmMinute = 36;
+  hour = sTime.Hours;
+  minute = sTime.Minutes;
+  weekDay = sDate.WeekDay;
+  day = sDate.Date;
+  month = sDate.Month;
+  year = sDate.Year;
 
-  Paint_DrawString_EN(0, 0, dayString(todayName), &Font24, BLACK, WHITE);
-  Paint_DrawNum(0, Font24.Height, month / 10, &Font24, WHITE, BLACK);
-  Paint_DrawNum(Font24.Width, Font24.Height, month % 10, &Font24, WHITE, BLACK);
-  Paint_DrawChar(Font24.Width * 2, Font24.Height, '-', &Font24, BLACK, WHITE);
-  Paint_DrawNum(Font24.Width * 3, Font24.Height, day / 10, &Font24, WHITE, BLACK);
-  Paint_DrawNum(Font24.Width * 4, Font24.Height, day % 10, &Font24, WHITE, BLACK);
-  Paint_DrawChar(Font24.Width * 5, Font24.Height, '-', &Font24, BLACK, WHITE);
-  Paint_DrawNum(Font24.Width * 6, Font24.Height, year, &Font24, WHITE, BLACK);
+  alarmHour = 8;
+  alarmMinute = 0;
+  alarmToggle = 1;
 
-  Paint_DrawString_EN(0, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, "ALARM", &Font24, BLACK, WHITE);
-  Paint_DrawString_EN(Font24.Width * 6, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, "OFF", &Font24, BLACK, WHITE);
-  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour / 10, &Font24, WHITE, BLACK);
-  Paint_DrawNum(Font24.Width, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour % 10, &Font24, WHITE, BLACK);
-  Paint_DrawChar(Font24.Width * 2, EPD_1IN54_V2_HEIGHT - Font24.Height, ':', &Font24, BLACK, WHITE);
-  Paint_DrawNum(Font24.Width * 3, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute / 10, &Font24, WHITE, BLACK);
-  Paint_DrawNum(Font24.Width * 4, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute % 10, &Font24, WHITE, BLACK);
+  Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, WHITE, BLACK);
+  Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, WHITE, BLACK);
+  Paint_DrawChar(100 - timeWidth / 2, 100 - timeHeight / 2, ':', &timeFont, BLACK, WHITE);
+  Paint_DrawNum(100 + timeWidth / 2, 100 - timeHeight / 2, minute / 10, &timeFont, WHITE, BLACK);
+  Paint_DrawNum(100 + timeWidth * 1.5, 100 - timeHeight / 2, minute % 10, &timeFont, WHITE, BLACK);
 
-  Paint_DrawTime(0, 74, &sPaint_time, &font, WHITE, BLACK);
+  Paint_DrawString_EN(0, 0, dayString(weekDay), &smallFont, BLACK, WHITE);
+  Paint_DrawNum(0, smallHeight, month / 10, &smallFont, WHITE, BLACK);
+  Paint_DrawNum(smallWidth, smallHeight, month % 10, &smallFont, WHITE, BLACK);
+  Paint_DrawChar(smallWidth * 2, smallHeight, '-', &smallFont, BLACK, WHITE);
+  Paint_DrawNum(smallWidth * 3, smallHeight, day / 10, &smallFont, WHITE, BLACK);
+  Paint_DrawNum(smallWidth * 4, smallHeight, day % 10, &smallFont, WHITE, BLACK);
+  Paint_DrawChar(smallWidth * 5, smallHeight, '-', &smallFont, BLACK, WHITE);
+  Paint_DrawNum(smallWidth * 6, smallHeight, year, &smallFont, WHITE, BLACK);
+
+  Paint_DrawString_EN(0, EPD_1IN54_V2_HEIGHT - smallHeight * 2, "ALARM", &smallFont, BLACK, WHITE);
+  Paint_DrawString_EN(smallWidth * 6, EPD_1IN54_V2_HEIGHT - smallHeight * 2, (alarmToggle == 0) ? "OFF" : "ON ", &smallFont, BLACK, WHITE);
+  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour / 10, &smallFont, WHITE, BLACK);
+  Paint_DrawNum(smallWidth, EPD_1IN54_V2_HEIGHT - smallHeight, alarmHour % 10, &smallFont, WHITE, BLACK);
+  Paint_DrawChar(smallWidth * 2, EPD_1IN54_V2_HEIGHT - smallHeight, ':', &smallFont, BLACK, WHITE);
+  Paint_DrawNum(smallWidth * 3, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute / 10, &smallFont, WHITE, BLACK);
+  Paint_DrawNum(smallWidth * 4, EPD_1IN54_V2_HEIGHT - smallHeight, alarmMinute % 10, &smallFont, WHITE, BLACK);
+
   EPD_1IN54_V2_DisplayPart(BlackImage);
-
-  HAL_TIM_Base_Start_IT(&htim7);
 
   /* USER CODE END 2 */
 
-  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
@@ -370,107 +546,24 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  if (refreshFlag) {
-		  if (adjMode) {
-			  if (adjPos < 3) {
-				  Paint_ClearWindows(Font24.Width*3, EPD_1IN54_V2_HEIGHT - Font24.Height, Font24.Width*5, EPD_1IN54_V2_HEIGHT, WHITE);
-				  Paint_DrawNum(Font24.Width * 3, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute / 10, &Font24, WHITE, BLACK);
-				  Paint_DrawNum(Font24.Width * 4, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute % 10, &Font24, WHITE, BLACK);
-				  Paint_DrawRectangle(fontWidth * 2 * (adjPos) + (fontWidth / 2) * adjPos, 70 + fontHeight,
-						  fontWidth * 2 * (adjPos + 1) + (fontWidth / 2) * adjPos - 3, 75 + fontHeight,
-						  BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
-			  } else {
-				  switch(adjPos) {
-				  case 3:
-					  Paint_DrawString_EN(0, 0, dayString(todayName), &Font24, WHITE, BLACK);
-					  break;
-				  case 4:
-					  Paint_ClearWindows(0, 0, Font24.Width*3, Font24.Height, WHITE);
-					  Paint_DrawString_EN(0, 0, dayString(todayName), &Font24, BLACK, WHITE);
-					  Paint_DrawNum(0, Font24.Height, month / 10, &Font24, BLACK, WHITE);
-					  Paint_DrawNum(Font24.Width, Font24.Height, month % 10, &Font24, BLACK, WHITE);
-					  break;
-				  case 5:
-					  Paint_ClearWindows(0, Font24.Height, Font24.Width*2, Font24.Height*2, WHITE);
-					  Paint_DrawNum(0, Font24.Height, month / 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width, Font24.Height, month % 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width * 3, Font24.Height, day / 10, &Font24, BLACK, WHITE);
-					  Paint_DrawNum(Font24.Width * 4, Font24.Height, day % 10, &Font24, BLACK, WHITE);
-					  break;
-				  case 6:
-					  Paint_ClearWindows(Font24.Width*3, Font24.Height, Font24.Width*5, Font24.Height*2, WHITE);
-					  Paint_DrawNum(Font24.Width * 3, Font24.Height, day / 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width * 4, Font24.Height, day % 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width * 6, Font24.Height, year, &Font24, BLACK, WHITE);
-					  break;
-				  case 7:
-					  Paint_ClearWindows(Font24.Width*6, Font24.Height, Font24.Width*10, Font24.Height*2, WHITE);
-					  Paint_DrawNum(Font24.Width * 6, Font24.Height, year, &Font24, WHITE, BLACK);
-					  Paint_DrawString_EN(Font24.Width * 6, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, (alarmToggle == 0) ? "OFF" : "ON ", &Font24, WHITE, BLACK);
-					  break;
-				  case 8:
-					  Paint_ClearWindows(Font24.Width*6, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, Font24.Width*9, EPD_1IN54_V2_HEIGHT - Font24.Height, WHITE);
-					  Paint_DrawString_EN(Font24.Width * 6, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, (alarmToggle == 0) ? "OFF" : "ON ", &Font24, BLACK, WHITE);
-					  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour / 10, &Font24, BLACK, WHITE);
-					  Paint_DrawNum(Font24.Width, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour % 10, &Font24, BLACK, WHITE);
-					  break;
-				  case 9:
-					  Paint_ClearWindows(0, EPD_1IN54_V2_HEIGHT - Font24.Height, Font24.Width*2, EPD_1IN54_V2_HEIGHT, WHITE);
-					  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour / 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour % 10, &Font24, WHITE, BLACK);
-					  Paint_DrawNum(Font24.Width * 3, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute / 10, &Font24, BLACK, WHITE);
-					  Paint_DrawNum(Font24.Width * 4, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute % 10, &Font24, BLACK, WHITE);
-				  default:
-				  }
-
-			  }
-		  } else {
-			  if (day > maxDay()) {
-				  day = 1;
-				  month++;
-
-				  if (month > 12) {
-					  month = 1;
-					  year++;
-				  }
-			  }
-
-			  if (alarmToggle && !alarmStopped && !alarmPlay
-				&& sPaint_time.Hour == alarmHour && sPaint_time.Min == alarmMinute) {
-				  HAL_TIM_Base_Start_IT(&htim16);
-				  alarmPlay = 1;
-			  }
-
-			  if (alarmStopped && sPaint_time.Hour == alarmHour && sPaint_time.Min == alarmMinute + 1) {
-				  alarmStopped = 0;
-			  }
-
-			  Paint_ClearWindows(0, 0, Font24.Width*10, Font24.Height*2, WHITE);
-			  Paint_DrawString_EN(0, 0, dayString(todayName), &Font24, BLACK, WHITE);
-			  Paint_DrawNum(0, Font24.Height, month / 10, &Font24, WHITE, BLACK);
-			  Paint_DrawNum(Font24.Width, Font24.Height, month % 10, &Font24, WHITE, BLACK);
-			  Paint_DrawChar(Font24.Width * 2, Font24.Height, '-', &Font24, BLACK, WHITE);
-			  Paint_DrawNum(Font24.Width * 3, Font24.Height, day / 10, &Font24, WHITE, BLACK);
-			  Paint_DrawNum(Font24.Width * 4, Font24.Height, day % 10, &Font24, WHITE, BLACK);
-			  Paint_DrawChar(Font24.Width * 5, Font24.Height, '-', &Font24, BLACK, WHITE);
-			  Paint_DrawNum(Font24.Width * 6, Font24.Height, year, &Font24, WHITE, BLACK);
-
-			  Paint_ClearWindows(0, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, Font24.Width*9, EPD_1IN54_V2_HEIGHT, WHITE);
-			  Paint_DrawString_EN(0, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, "ALARM", &Font24, BLACK, WHITE);
-			  Paint_DrawString_EN(Font24.Width * 6, EPD_1IN54_V2_HEIGHT - Font24.Height * 2, (alarmToggle == 0) ? "OFF" : "ON ", &Font24, BLACK, WHITE);
-			  Paint_DrawNum(0, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour / 10, &Font24, WHITE, BLACK);
-			  Paint_DrawNum(Font24.Width, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmHour % 10, &Font24, WHITE, BLACK);
-			  Paint_DrawChar(Font24.Width * 2, EPD_1IN54_V2_HEIGHT - Font24.Height, ':', &Font24, BLACK, WHITE);
-			  Paint_DrawNum(Font24.Width * 3, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute / 10, &Font24, WHITE, BLACK);
-			  Paint_DrawNum(Font24.Width * 4, EPD_1IN54_V2_HEIGHT - Font24.Height, alarmMinute % 10, &Font24, WHITE, BLACK);
-		  }
-
-		  EPD_1IN54_V2_DisplayPart(BlackImage);
-		  refreshFlag = 0;
+		  refresh();
 	  }
 
-	  HAL_SuspendTick();
-	  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON,PWR_SLEEPENTRY_WFI);
-	  HAL_ResumeTick();
+	  if (!timerRunning && !adjMode) {
+		  if (refreshFlag) {
+			  refresh();
+		  }
+
+		  HAL_SuspendTick();
+
+		  HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 59, RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
+		  /* Enter STOP 2 mode */
+		  HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
+		  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+		  SystemClock_Config();
+		  HAL_ResumeTick();
+	  }
+
   }
   /* USER CODE END 3 */
 }
@@ -533,6 +626,42 @@ void SystemClock_Config(void)
   /** Enable MSI Auto calibration
   */
   HAL_RCCEx_EnableMSIPLLMode();
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
 }
 
 /**
@@ -610,44 +739,6 @@ static void MX_TIM6_Init(void)
   /* USER CODE BEGIN TIM6_Init 2 */
 
   /* USER CODE END TIM6_Init 2 */
-
-}
-
-/**
-  * @brief TIM7 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM7_Init(void)
-{
-
-  /* USER CODE BEGIN TIM7_Init 0 */
-
-  /* USER CODE END TIM7_Init 0 */
-
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM7_Init 1 */
-
-  /* USER CODE END TIM7_Init 1 */
-  htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 2048;
-  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 15624;
-  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM7_Init 2 */
-
-  /* USER CODE END TIM7_Init 2 */
 
 }
 
@@ -789,6 +880,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : B3_Pin B4_Pin */
+  GPIO_InitStruct.Pin = B3_Pin|B4_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pin : LD3_Pin */
   GPIO_InitStruct.Pin = LD3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -802,6 +899,9 @@ static void MX_GPIO_Init(void)
 
   HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

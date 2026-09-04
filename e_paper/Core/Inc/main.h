@@ -79,6 +79,12 @@ void Error_Handler(void);
 #define B2_Pin GPIO_PIN_1
 #define B2_GPIO_Port GPIOB
 #define B2_EXTI_IRQn EXTI1_IRQn
+#define B3_Pin GPIO_PIN_8
+#define B3_GPIO_Port GPIOA
+#define B3_EXTI_IRQn EXTI9_5_IRQn
+#define B4_Pin GPIO_PIN_9
+#define B4_GPIO_Port GPIOA
+#define B4_EXTI_IRQn EXTI9_5_IRQn
 #define BUZZER_Pin GPIO_PIN_12
 #define BUZZER_GPIO_Port GPIOA
 #define SWDIO_Pin GPIO_PIN_13
