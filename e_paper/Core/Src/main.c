@@ -53,6 +53,7 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 volatile int timerRunning;
 
+// font constants
 UBYTE BlackImage[5000];
 sFONT timeFont;
 sFONT smallFont;
@@ -61,6 +62,7 @@ int timeHeight;
 int smallWidth;
 int smallHeight;
 
+// button constants for de-bouncing
 volatile uint32_t currentMS;
 volatile uint32_t PrevB1Press;
 volatile uint32_t PrevB2Press;
@@ -68,12 +70,16 @@ volatile uint32_t PrevB3Press;
 volatile uint32_t PrevB4Press;
 
 volatile int refreshFlag;
+
+// adjust mode params
 volatile int adjMode;
 volatile int adjPos;
 
+// RTC time and date
 RTC_TimeTypeDef sTime;
 RTC_DateTypeDef sDate;
 
+// watch time and date
 volatile int hour;
 volatile int minute;
 volatile int weekDay;
@@ -81,6 +87,7 @@ volatile int day;
 volatile int month;
 volatile int year;
 
+// alarm params
 volatile int alarmHour;
 volatile int alarmMinute;
 volatile int alarmToggle;
@@ -103,12 +110,17 @@ static void MX_RTC_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/**
+ * Get the total amount of milliseconds that have passed from the RTC
+ * @return time in milliseconds
+ */
 uint32_t RTC_GetTotalMS(void) {
     RTC_TimeTypeDef t;
     RTC_DateTypeDef d;
     HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
     HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
 
+    // calculate total milliseconds
     uint32_t ms = (255 - t.SubSeconds) / 256 * 1000;
     return (uint32_t)t.Hours * 3600000
          + (uint32_t)t.Minutes * 60000
@@ -116,30 +128,49 @@ uint32_t RTC_GetTotalMS(void) {
     	 + ms;
 }
 
+/**
+ * Timer interrupt handler
+ * @param timer that elapsed
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	if (htim == &htim6) {
+		// de-bounce
 		if (HAL_GPIO_ReadPin(GPIOA, B3_Pin) == GPIO_PIN_SET && (RTC_GetTotalMS() - PrevB3Press) >= 1000) {
-			HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+			// toggle adjust mode
 			adjMode = adjMode ^ 1;
 			adjPos = 0;
+
+			// refresh
 			refreshFlag = 1;
 			HAL_TIM_Base_Stop_IT(htim);
 		}
 		timerRunning = 0;
 	} else if (htim == &htim16) {
+		// play alarm
 		HAL_GPIO_TogglePin(GPIOA, BUZZER_Pin);
 	}
 
 }
 
+/**
+ * RTC wake-up handler
+ * @param RTC that woke up
+ */
 void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
+	// refresh
 	refreshFlag = 1;
 }
 
+/**
+ * Get the max day given the current month
+ * @return the number of the last day in the current month
+ */
 int maxDay() {
+	// September, April, June, November
 	if (month == 9 || month == 4 || month == 6 || month == 11) {
 		return 30;
-	} else if (month == 2) {
+	} else if (month == 2) { // February
+		// leap year
 		if (year % 4 == 0 && (year % 100 != 0 || (year % 100 == 0 && year % 400 == 0))) {
 			return 29;
 		}
@@ -150,31 +181,45 @@ int maxDay() {
 	}
 }
 
+/**
+ * Hardware interrupt handler
+ * @param The GPIO pin that the interrupt occurred on
+ */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	// resume high speed clock
 	SystemClock_Config();
 	HAL_ResumeTick();
 
 	if (alarmPlay) {
+		// stop alarm
 		HAL_TIM_Base_Stop_IT(&htim16);
 		alarmPlay = 0;
 		alarmStopped = 1;
 		timerRunning = 0;
 	}
 
+	// get total milliseconds that have passed for button de-bouncing
 	currentMS = RTC_GetTotalMS();
 
 	if (GPIO_Pin == B4_Pin) {
+		// de-bounce
 		if (!adjMode && (currentMS - PrevB4Press) >= 1000 && HAL_GPIO_ReadPin(GPIOA, B4_Pin) == GPIO_PIN_SET) {
 			PrevB4Press = currentMS;
+
+			// toggle alarm
 			alarmToggle ^= 1;
+
+			// refresh
 			refreshFlag = 1;
 		}
 	}
 
 	if (GPIO_Pin == B3_Pin) {
+		// de-bounce
 		if ((currentMS - PrevB3Press) >= 1000 && HAL_GPIO_ReadPin(GPIOA, B3_Pin) == GPIO_PIN_SET) {
 			PrevB3Press = currentMS;
 
+			// start adjust mode timer
 			timerRunning = 1;
 			HAL_TIM_Base_Stop_IT(&htim6);
 			__HAL_TIM_SET_COUNTER(&htim6, 0);
@@ -183,9 +228,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	}
 
 	if (GPIO_Pin == B2_Pin) {
+		// de-bounce
 		if ((currentMS - PrevB2Press) >= 10000 && HAL_GPIO_ReadPin(GPIOB, B2_Pin) == GPIO_PIN_SET && adjMode) {
 			PrevB2Press = currentMS;
 
+			// adjust watch
 			switch (adjPos) {
 			case 0:
 				hour = hour + 1;
@@ -272,10 +319,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	}
 
 	if (GPIO_Pin == B1_Pin) {
+		// de-bounce
 		if ((currentMS - PrevB1Press) >= 1000 && HAL_GPIO_ReadPin(GPIOB, B1_Pin) == GPIO_PIN_SET) {
 			PrevB1Press = currentMS;
 
 			if (adjMode) {
+				// change adjust mode position
 				adjPos++;
 				refreshFlag = 1;
 				if (adjPos > 9) {
@@ -286,6 +335,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	}
 }
 
+/**
+ * Get string from numeric day of the week
+ * @param day	the numeric representation of the day of the week
+ * @return the string representation of the day of the week
+ */
 const char* dayString(uint8_t day) {
 	switch(day) {
 	case 0:
@@ -307,7 +361,11 @@ const char* dayString(uint8_t day) {
 	}
 }
 
+/**
+ * Refresh the display
+ */
 void refresh(void) {
+	// display adjust mode position
 	if (adjMode) {
 	  switch(adjPos) {
 	  case 0:
@@ -379,6 +437,7 @@ void refresh(void) {
 	  default:
 	  }
   } else {
+	  // get and set time
 	  HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 	  HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
@@ -401,15 +460,18 @@ void refresh(void) {
 
 	  if (alarmToggle && !alarmStopped && !alarmPlay
 		&& hour == alarmHour && minute == alarmMinute) {
+		  // play alarm
 		  HAL_TIM_Base_Start_IT(&htim16);
 		  alarmPlay = 1;
 		  timerRunning = 1;
 	  }
 
 	  if (alarmStopped && hour == alarmHour && minute == alarmMinute + 1) {
+		  // stop alarm
 		  alarmStopped = 0;
 	  }
 
+	  // draw the watch face
 	  Paint_ClearWindows(100 - timeWidth * 2.5, 100 - timeHeight / 2, 100 + timeWidth*2.5, 100 + timeHeight / 2, WHITE);
 	  Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, WHITE, BLACK);
 	  Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, WHITE, BLACK);
@@ -479,11 +541,13 @@ int main(void)
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
 
+  // init EPD
   DEV_Module_Init();
   EPD_1IN54_V2_Init();
   EPD_1IN54_V2_Clear();
   DEV_Delay_ms(500);
 
+  // font constants
   timeFont = Consolas28;
   timeWidth = timeFont.Width;
   timeHeight = timeFont.Height;
@@ -492,12 +556,14 @@ int main(void)
   smallWidth = smallFont.Width;
   smallHeight = smallFont.Height;
 
+  // clear display
   Paint_NewImage(BlackImage, EPD_1IN54_V2_WIDTH, EPD_1IN54_V2_HEIGHT, 270, WHITE);
 
   EPD_1IN54_V2_Init_Partial();
   Paint_SelectImage(BlackImage);
   Paint_Clear(WHITE);
 
+  // get and set time
   HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
   HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
@@ -512,6 +578,7 @@ int main(void)
   alarmMinute = 0;
   alarmToggle = 1;
 
+  // draw the watch face
   Paint_DrawNum(100 - timeWidth * 2.5, 100 - timeHeight / 2, hour / 10, &timeFont, WHITE, BLACK);
   Paint_DrawNum(100 - timeWidth * 1.5, 100 - timeHeight / 2, hour % 10, &timeFont, WHITE, BLACK);
   Paint_DrawChar(100 - timeWidth / 2, 100 - timeHeight / 2, ':', &timeFont, BLACK, WHITE);
@@ -546,18 +613,21 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  if (refreshFlag) {
+		  // update display
 		  refresh();
 	  }
 
+	  // check if a timer is running or user is adjusting time
 	  if (!timerRunning && !adjMode) {
 		  if (refreshFlag) {
+			  // update display
 			  refresh();
 		  }
 
+		  // enter STOP 2 mode to save power
 		  HAL_SuspendTick();
 
 		  HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 59, RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
-		  /* Enter STOP 2 mode */
 		  HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
 		  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
 		  SystemClock_Config();
